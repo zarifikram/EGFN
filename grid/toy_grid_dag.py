@@ -285,6 +285,66 @@ class ReplayBuffer:
             r = 0
         return traj
 
+class ReplayBufferTB:
+    def __init__(self, args, env):
+        self.buf = []
+        self.args = args
+        self.strat = args.replay_strategy
+        self.sample_size = args.replay_sample_size
+        self.bufsize = args.replay_buf_size
+        self.env = env
+
+    def add(self, x, a, r_x):
+        if self.strat == 'top_k':
+            if len(self.buf) < self.bufsize or r_x > self.buf[0][0]:
+                self.buf = sorted(self.buf + [(r_x, a, x)], key = lambda x : x[0])[-self.bufsize:]
+
+    def sample(self):
+        # this has to give us [state, action, reward] state.shape is (self.sample_size, traj_length, dim)
+        # action.shape is (self.sample_size, traj_length, 1) # reward.shape is (self.sample_size, 1)
+        if not len(self.buf):
+            return []
+        if self.args.prb:
+            # sample priority reward buffer. Divide the buffer into two parts: high reward and low reward
+            # sample from high reward part with probability 0.5, and sample from low reward part with probability 0.5
+            # get the last 10% from self.buf
+            sample_size = int(self.sample_size / 2)
+            top10_percentile = self.buf[int(len(self.buf) * 0.9):]
+            idxs = np.random.randint(0, len(top10_percentile), sample_size)
+            sample1 = [top10_percentile[i] for i in idxs]
+            other90_percentile = self.buf[:int(len(self.buf) * 0.9)]
+            idxs = np.random.randint(0, len(other90_percentile), sample_size)
+            sample2 = [other90_percentile[i] for i in idxs]
+            return sample1 + sample2
+        idxs = np.random.randint(0, len(self.buf), self.sample_size)
+        return sum([self.generate_backward(*self.buf[i]) for i in idxs], [])
+
+    def generate_backward(self, r, s0):
+        s = np.int8(s0)
+        os0 = self.env.obs(s)
+        # If s0 is a forced-terminal state, the the action that leads
+        # to it is s0.argmax() which .parents finds, but if it isn't,
+        # we must indicate that the agent ended the trajectory with
+        # the stop action
+        used_stop_action = s.max() < self.env.horizon - 1
+        done = True
+        # Now we work backward from that last transition
+        traj = []
+        while s.sum() > 0:
+            parents, actions = self.env.parent_transitions(s, used_stop_action)
+            # add the transition
+            traj.append([tf(i) for i in (parents, actions, [r], [self.env.obs(s)], [done])])
+            # Then randomly choose a parent state
+            if not used_stop_action:
+                i = np.random.randint(0, len(parents))
+                a = actions[i]
+                s[a] -= 1
+            # Values for intermediary trajectory states:
+            used_stop_action = False
+            done = False
+            r = 0
+        return traj
+
 
 class FlowNetAgent:
     def __init__(self, args, envs, is_star=True):
@@ -374,7 +434,7 @@ class TBFlowNetAgent:
         self.model.to(args.dev)
         print (self.model)
         self.args = args
-
+        self.replay = ReplayBufferTB(args, envs)
         self.Z = torch.zeros((1,)).to(args.dev)
         self.Z.requires_grad_()
 
@@ -447,15 +507,20 @@ class TBFlowNetAgent:
                 if d:
                     all_visited.append(tuple(sp))
                     terminals.append(list(sp))
-
         # batch_steps = [len(batch_s[i]) for i in range(len(batch_s))]
         for i in range(len(batch_s)):
             batch_s[i] = torch.stack(batch_s[i])
             batch_a[i] = torch.stack(batch_a[i])
             assert batch_s[i].shape[0] - batch_a[i].shape[0] == 1
-
+        replay_s, replay_a, replay_R = [], [], []
+        for r, a, x in self.replay.sample():
+            replay_s.append(x)
+            replay_a.append(a)
+            replay_R.append(r)
         batch_R = [env_idx_return_map[i] for i in range(len(batch_s))]
-        return [batch_s, batch_a, batch_R]  #, np.mean(batch_R)
+        for s, a, r in zip(batch_s, batch_a, batch_R):
+            self.replay.add(s, a, r)
+        return [batch_s + replay_s, batch_a + replay_a, batch_R + replay_R]  #, np.mean(batch_R) this gives us trajectory
 
     def convert_states_to_onehot(self, states):
         # convert to onehot format
@@ -992,7 +1057,7 @@ def main(args):
     f = get_func(args)
     env = GridEnv(args.horizon, args.ndim, func=f, allow_backward=args.is_mcmc)
     envs = [GridEnv(args.horizon, args.ndim, func=f, allow_backward=args.is_mcmc)
-                for _ in range(args.bufsize)]
+                for _ in range(args.mbsize)]
 
     # GFN methods
     if args.method in ["fm"]:
