@@ -230,6 +230,7 @@ def make_mlp(l, act=nn.LeakyReLU(), tail=[]):
 class ReplayBuffer:
     def __init__(self, args, env):
         self.buf = []
+        self.args = args
         self.strat = args.replay_strategy
         self.sample_size = args.replay_sample_size
         self.bufsize = args.replay_buf_size
@@ -243,6 +244,18 @@ class ReplayBuffer:
     def sample(self):
         if not len(self.buf):
             return []
+        if self.args.prb:
+            # sample priority reward buffer. Divide the buffer into two parts: high reward and low reward
+            # sample from high reward part with probability 0.5, and sample from low reward part with probability 0.5
+            # get the last 10% from self.buf
+            sample_size = int(self.sample_size / 2)
+            top10_percentile = self.buf[int(len(self.buf) * 0.9):]
+            idxs = np.random.randint(0, len(top10_percentile), sample_size)
+            sample1 = sum([self.generate_backward(*top10_percentile[i]) for i in idxs], [])
+            other90_percentile = self.buf[:int(len(self.buf) * 0.9)]
+            idxs = np.random.randint(0, len(other90_percentile), sample_size)
+            sample2 = sum([self.generate_backward(*other90_percentile[i]) for i in idxs], [])
+            return sample1 + sample2
         idxs = np.random.randint(0, len(self.buf), self.sample_size)
         return sum([self.generate_backward(*self.buf[i]) for i in idxs], [])
 
