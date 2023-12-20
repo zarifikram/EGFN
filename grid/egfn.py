@@ -13,10 +13,17 @@ class EvolutionGFNAgent:
     def __init__(self, args, env):
         self.args = args
         self.env = env
-        self.agent_star = FlowNetAgent(args, env, is_star=True)
+        self.agent_star = (
+            FlowNetAgent(args, env, is_star=True)
+            if args.method == "fm_egfn"
+            else TBFlowNetAgent(args, env, is_star=True)
+        )
 
         self.population = [
-            FlowNetAgent(args, env, is_star=False) for _ in range(args.population_size)
+            FlowNetAgent(args, env, is_star=False)
+            if args.method == "fm_egfn"
+            else TBFlowNetAgent(args, env, is_star=False)
+            for _ in range(args.population_size)
         ]
         # turn off gradient for population
         self.turn_off_population_gradients()
@@ -37,7 +44,7 @@ class EvolutionGFNAgent:
 
     def evaluate(self, agent, add_noise=False):
         data = agent.sample_many(self.args.num_eval_episodes, [])
-        rewards = tf([reward for (_, _, reward, _, _) in data])
+        rewards = tf([reward for (_, _, reward, _, _) in data]) if self.args.method == "fm_egfn" else data[2]
         return rewards.sum().item() / self.args.num_eval_episodes
 
     def evolve(self):
@@ -65,7 +72,6 @@ class EvolutionGFNAgent:
 
         # mutate all agents except the elite
         self.mutate_all_but_elite(elite_index)
-    
 
     def mutate_all_but_elite(self, elite_index):
         for i in range(self.args.population_size):
@@ -133,7 +139,7 @@ class EvolutionGFNAgent:
                     weight[i, j] += random.gauss(
                         0, self.args.mutation_strength * weight[i, j]
                     )
- 
+
             weight = torch.clip(weight, -self.args.weight_limit, self.args.weight_limit)
 
     def mutate2(self, agent: FlowNetAgent):
@@ -144,7 +150,6 @@ class EvolutionGFNAgent:
         for param in agent.model.parameters():
             if random.random() < self.args.mutation_prob:
                 param.data += torch.normal(mean=0, std=1, size=param.size())
-
 
     def transfer_elite_weights(self, elite_index, unselected_index, offspring_index):
         new_elite_index = []

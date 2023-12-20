@@ -429,7 +429,7 @@ class FlowNetAgent:
         return loss, term_loss.detach(), flow_loss.detach()
 
 class TBFlowNetAgent:
-    def __init__(self, args, envs):
+    def __init__(self, args, envs, is_star=True):
         self.model = make_mlp([args.horizon * args.ndim] + [args.n_hid] * args.n_layers + [2 * args.ndim + 1])
         self.model.to(args.dev)
         print (self.model)
@@ -442,6 +442,7 @@ class TBFlowNetAgent:
         self.ndim = args.ndim
         self.horizon = args.horizon
         self.tau = args.bootstrap_tau
+        self.is_star = is_star
         
         self.exp_weight = args.exp_weight
         self.temp = args.temp
@@ -462,13 +463,13 @@ class TBFlowNetAgent:
 
         s = tf([i.reset()[0] for i in self.envs])
         done = [False] * mbsize
+     
 
         terminals = []
         while not all(done):
             with torch.no_grad():
                 pred = self.model(s)
                 z = s.reshape(-1, self.ndim, self.horizon).argmax(-1)
-
                 # mask unavailable actions
                 edge_mask = torch.cat([(z == self.horizon - 1).float(),
                                         torch.zeros((len(done) - sum(done), 1), device=self.args.dev)], 1)
@@ -512,11 +513,12 @@ class TBFlowNetAgent:
             batch_s[i] = torch.stack(batch_s[i])
             batch_a[i] = torch.stack(batch_a[i])
             assert batch_s[i].shape[0] - batch_a[i].shape[0] == 1
-        replay_s, replay_a, replay_R = [], [], []
-        for r, a, x in self.replay.sample():
-            replay_s.append(x)
-            replay_a.append(a)
-            replay_R.append(r)
+        replay_s, replay_a, replay_R = [], [], [] 
+        if self.is_star: # only agent star samples from replay
+            for r, a, x in self.replay.sample():
+                replay_s.append(x)
+                replay_a.append(a)
+                replay_R.append(r)
         batch_R = [env_idx_return_map[i] for i in range(len(batch_s))]
         for s, a, r in zip(batch_s, batch_a, batch_R):
             self.replay.add(s, a, r)
@@ -1066,7 +1068,7 @@ def main(args):
         agent = TBFlowNetAgent(args, envs)
     elif args.method in ['db', 'db_gfn']:
         agent = DBFlowNetAgent(args, envs)
-    elif args.method in ['fm_egfn']:
+    elif args.method in ['fm_egfn', 'tb_egfn']:
         from egfn import EvolutionGFNAgent
         evo_agent = EvolutionGFNAgent(args, envs)
         agent = evo_agent.agent_star
@@ -1086,7 +1088,7 @@ def main(args):
     elif args.method in ['random_traj', "rand", "random"]:
         agent = RandomTrajAgent(args, envs)
 
-    if args.method in ['tb', 'tb_gfn', 'ftb']:
+    if args.method in ['tb', 'tb_gfn', 'tb_egfn', 'ftb']:
         opt = torch.optim.Adam([{'params': agent.parameters(), 'lr': args.tlr},
                                  {'params':[agent.Z], 'lr': args.zlr} ])
     elif args.method in ['db', 'db_gfn', 'fdb']:
@@ -1113,7 +1115,7 @@ def main(args):
         sttr = args.ppo_epoch_size
 
     for i in tqdm(range(args.n_train_steps+1), disable=not args.progress):
-        if args.method in ['fm_egfn']:
+        if args.method in ['fm_egfn', 'tb_egfn']:
             evo_agent.evolve()
         data = []
         for j in range(sttr):
