@@ -158,7 +158,7 @@ class Proxy:
 _stop = [None]
 
 
-def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=True):
+def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=True, egfn=None):
     debug_no_threads = False
     device = torch.device('cpu')
 
@@ -236,7 +236,7 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
             minibatch = r
         else:
             minibatch = dataset.sample2batch(dataset.sample(mbsize))
-        if args.obj == 'fm':
+        if args.obj in ['fm', 'fm_egfn']:
             p, pb, a, r, s, d, mols = minibatch
             # Since we sampled 'mbsize' trajectories, we're going to get
             # roughly mbsize * H (H is variable) transitions
@@ -399,7 +399,7 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
         if not i % print_interval:
             last_losses = [np.round(np.mean(i), 3) for i in zip(*last_losses)]
             wandb_dict = {"loss/loss": last_losses[0]} 
-            if args.obj in ['fm', 'qm']:
+            if args.obj in ['fm', 'qm', 'fm_egfn']:
                 wandb_dict.update({"loss/terminal": last_losses[1], "loss/flow": last_losses[2]})
             print(f"Iter={i}", " ".join([f"{k}={v:.2f}" for k, v in wandb_dict.items()]))
             time_used = time.time() - time_last_check
@@ -484,7 +484,7 @@ def main_mols(args):
     else:
         args.floatX = torch.double
     
-    if args.obj in ['fm', 'qm']:
+    if args.obj in ['fm', 'qm', 'fm_egfn']:
         dataset = Dataset(args, bpath, device, floatX=args.floatX)
     else:
         args.ignore_parents = True
@@ -493,11 +493,15 @@ def main_mols(args):
 
     model = make_model(args, mdp, 
         out_per_mol=1 + (1 if args.obj in ['subtb', 'subtbWS', 'detbal', "db"] else 0))
+    
+   
     model.to(args.floatX)
     model.to(device)
 
     proxy = Proxy(args, bpath, device)
-    train_model_with_proxy(args, model, proxy, dataset, do_save=True)
+    if args.obj in ['fm_egfn']: from egfn import EvolutionGFNAgent
+    egfn = EvolutionGFNAgent(args, mdp, model, device, proxy, dataset) if args.obj in ['fm_egfn'] else None
+    train_model_with_proxy(args, model, proxy, dataset, do_save=True, egfn=egfn)
     print('Done.')
     if args.wandb:
         wandb.finish()

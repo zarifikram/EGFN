@@ -53,3 +53,18 @@ N: 16
 quantile_dim: 256
 nvec: 256
 ts: false
+
+# Evolution Guided GFlowNet
+population_size: 10 # 25 might be good
+num_eval_episodes: 10 # 1 seems just fine
+num_elites: 2
+tournament_size: 4
+mutation: true
+crossover_prob: 0.1
+mutation_prob: 0.9
+mutation_frac: 0.1
+mutation_strength: 0.1
+super_mutation_strength: 10
+super_mutation_prob: 0.25 #0.25 is good
+reset_prob: 0.1
+weight_limit: 100000

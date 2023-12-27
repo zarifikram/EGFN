@@ -43,7 +43,7 @@ class Dataset:
 
         self.online_mols = []
         self.max_online_mols = 1000
-
+        print("max blocks", self.max_blocks)
     def set_sampling_model(self, model, proxy_reward, sample_prob=0.5):
         self.sampling_model = model
         self.sampling_model_prob = sample_prob
@@ -111,7 +111,7 @@ class Dataset:
                     s_o, m_o = self.sampling_model(s)
             else:
                 s_o, m_o = self.sampling_model(s)
-
+            
             ## fix from run 330 onwards
             if t < self.min_blocks:
                 m_o = m_o * 0 - 1000 # prevent assigning prob to stop
@@ -153,7 +153,7 @@ class Dataset:
                         samples.append(((m_old,), (action,), 0, m, 0))
                     else:
                         samples.append((*zip(*self.mdp.parents(m)), 0, m, 0))
-                        
+        print(f"SAMPLED {len(samples)}")                
         p = self.mdp.mols2batch([self.mdp.mol2repr(i) for i in samples[-1][0]])
         qp = self.sampling_model(p)
 

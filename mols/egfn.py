@@ -1,35 +1,33 @@
 import random
 import numpy as np
-from toy_grid_dag import FlowNetAgent, TBFlowNetAgent, DBFlowNetAgent
 import torch, fastrand
 from time import time
+from gflownet import make_model
 
 _dev = [torch.device("cpu")]
 tf = lambda x: torch.FloatTensor(x).to(_dev[0])
 tl = lambda x: torch.LongTensor(x).to(_dev[0])
 
-methods_to_agent = {
-    "fm_egfn": FlowNetAgent,
-    "tb_egfn": TBFlowNetAgent,
-    "db_egfn": DBFlowNetAgent,
-}
-
 
 class EvolutionGFNAgent:
-    def __init__(self, args, env):
+    def __init__(self, args, mdp, agent_star, device, proxy, dataset):
         self.args = args
-        self.env = env
-        self.agent_star = methods_to_agent[args.method](args, env, is_star=True)
+        self.mdp = mdp
+        self.agent_star = agent_star
+        self.device = device
+        self.proxy = proxy
+        self.dataset = dataset
 
         self.population = [
-            methods_to_agent[args.method](args, env)
-            for _ in range(args.population_size)
+            make_model(args, mdp, 
+        out_per_mol=1 + (1 if args.obj in ['subtb', 'subtbWS', 'detbal', "db"] else 0)) for _ in range(args.population_size)
         ]
+        print("Population size:", len(self.population))
         # turn off gradient for population
         self.turn_off_population_gradients()
 
         # population stores its experience in the star agent's replay buffer
-        self.replace_population_replay_buffer()
+        # self.replace_population_replay_buffer()
 
         # might add OUNOISE later
 
@@ -44,11 +42,7 @@ class EvolutionGFNAgent:
 
     def evaluate(self, agent, add_noise=False):
         data = agent.sample_many(self.args.num_eval_episodes, [])
-        rewards = (
-            tf([reward for (_, _, reward, _, _) in data])
-            if self.args.method == "fm_egfn"
-            else tf(data[2])
-        )
+        rewards = tf([reward for (_, _, reward, _, _) in data]) if self.args.method == "fm_egfn" else tf(data[2])
         return rewards.sum().item() / self.args.num_eval_episodes
 
     def evolve(self):
@@ -100,7 +94,7 @@ class EvolutionGFNAgent:
             self.clone(self.population[offspring_ind], self.population[j])
             self.crossover(self.population[i], self.population[j])
 
-    def crossover(self, agent1: FlowNetAgent, agent2: FlowNetAgent):
+    def crossover(self, agent1, agent2):
         for param1, param2 in zip(agent1.model.parameters(), agent2.model.parameters()):
             W1, W2 = param1.data, param2.data
             num_crossovers = fastrand.pcg32bounded(W1.shape[0])
@@ -117,7 +111,7 @@ class EvolutionGFNAgent:
                     else:
                         W2[crossover_index, :] = W1[crossover_index, :]
 
-    def mutate(self, agent: FlowNetAgent):
+    def mutate(self, agent):
         weights = [
             p for p in agent.model.parameters() if len(p.shape) > 1
         ]  # exclude biases
@@ -146,7 +140,7 @@ class EvolutionGFNAgent:
 
             weight = torch.clip(weight, -self.args.weight_limit, self.args.weight_limit)
 
-    def mutate2(self, agent: FlowNetAgent):
+    def mutate2(self, agent):
         # agent's each param has a probability of being mutated (independently)
         # if ¥es, then mutate the param with torch.normal(mean=0, std=1)
         # if no, then do nothing
@@ -177,7 +171,7 @@ class EvolutionGFNAgent:
         return unselected_index
 
     def clone(
-        self, master: FlowNetAgent, replacee: FlowNetAgent
+        self, master, replacee
     ):  # Replace the replacee individual with master
         for target_param, source_param in zip(
             replacee.model.parameters(), master.model.parameters()

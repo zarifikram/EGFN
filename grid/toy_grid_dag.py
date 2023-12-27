@@ -345,6 +345,66 @@ class ReplayBufferTB:
             done = False
             r = 0
         return traj
+    
+class ReplayBufferDB:
+    def __init__(self, args, env):
+        self.buf = []
+        self.args = args
+        self.strat = args.replay_strategy
+        self.sample_size = args.replay_sample_size
+        self.bufsize = args.replay_buf_size
+        self.env = env
+
+    def add(self, x, a, r_x, steps):
+        if self.strat == 'top_k':
+            if len(self.buf) < self.bufsize or r_x > self.buf[0][0]:
+                self.buf = sorted(self.buf + [(r_x, a, x, steps)], key = lambda x : x[0])[-self.bufsize:]
+
+    def sample(self):
+        # this has to give us [state, action, reward] state.shape is (self.sample_size, traj_length, dim)
+        # action.shape is (self.sample_size, traj_length, 1) # reward.shape is (self.sample_size, 1)
+        if not len(self.buf):
+            return []
+        if self.args.prb:
+            # sample priority reward buffer. Divide the buffer into two parts: high reward and low reward
+            # sample from high reward part with probability 0.5, and sample from low reward part with probability 0.5
+            # get the last 10% from self.buf
+            sample_size = int(self.sample_size / 2)
+            top10_percentile = self.buf[int(len(self.buf) * 0.9):]
+            idxs = np.random.randint(0, len(top10_percentile), sample_size)
+            sample1 = [top10_percentile[i] for i in idxs]
+            other90_percentile = self.buf[:int(len(self.buf) * 0.9)]
+            idxs = np.random.randint(0, len(other90_percentile), sample_size)
+            sample2 = [other90_percentile[i] for i in idxs]
+            return sample1 + sample2
+        idxs = np.random.randint(0, len(self.buf), self.sample_size)
+        return sum([self.generate_backward(*self.buf[i]) for i in idxs], [])
+
+    def generate_backward(self, r, s0):
+        s = np.int8(s0)
+        os0 = self.env.obs(s)
+        # If s0 is a forced-terminal state, the the action that leads
+        # to it is s0.argmax() which .parents finds, but if it isn't,
+        # we must indicate that the agent ended the trajectory with
+        # the stop action
+        used_stop_action = s.max() < self.env.horizon - 1
+        done = True
+        # Now we work backward from that last transition
+        traj = []
+        while s.sum() > 0:
+            parents, actions = self.env.parent_transitions(s, used_stop_action)
+            # add the transition
+            traj.append([tf(i) for i in (parents, actions, [r], [self.env.obs(s)], [done])])
+            # Then randomly choose a parent state
+            if not used_stop_action:
+                i = np.random.randint(0, len(parents))
+                a = actions[i]
+                s[a] -= 1
+            # Values for intermediary trajectory states:
+            used_stop_action = False
+            done = False
+            r = 0
+        return traj
 
 
 class FlowNetAgent:
@@ -562,7 +622,7 @@ class TBFlowNetAgent:
         return [loss]
 
 class DBFlowNetAgent:
-    def __init__(self, args, envs):
+    def __init__(self, args, envs, is_star=True):
         out_dim = 2 * args.ndim + 2
         self.model = make_mlp([args.horizon * args.ndim] + [args.n_hid] * args.n_layers + [out_dim])
         self.model.to(args.dev)
@@ -582,6 +642,8 @@ class DBFlowNetAgent:
         self.dev = args.dev
 
         self.iter_cnt = 0
+        self.is_star = is_star
+        self.replay = ReplayBufferDB(args, envs)
 
     def parameters(self):
         # return parameters' of the model
@@ -597,7 +659,7 @@ class DBFlowNetAgent:
 
         s = tf([i.reset()[0] for i in self.envs]).to(self.device)
         done = [False] * mbsize
-
+        s = s[:mbsize, ...]
         terminals = []
         while not all(done):
             with torch.no_grad():
@@ -651,7 +713,16 @@ class DBFlowNetAgent:
 
         batch_R = [env_idx_return_map[i]for i in range(len(batch_s)) ]
         mean_return = 1.0 * sum(batch_R) / len(batch_R)
-        return [batch_s, batch_a, batch_R, batch_steps]#, mean_return
+        replay_s, replay_a, replay_R, replay_steps = [], [], [], []
+        if self.is_star: # only agent star samples from replay
+            for r, a, x, steps in self.replay.sample():
+                replay_s.append(x)
+                replay_a.append(a)
+                replay_R.append(r)
+                replay_steps.append(steps)
+        for s, a, r, steps in zip(batch_s, batch_a, batch_R, batch_steps):
+            self.replay.add(s, a, r, steps)
+        return [batch_s + replay_s, batch_a + replay_a, batch_R + replay_R, batch_steps + replay_steps] #mean_return
 
     def convert_states_to_onehot(self, states):
         # convert to onehot format
@@ -1069,7 +1140,7 @@ def main(args):
         agent = TBFlowNetAgent(args, envs)
     elif args.method in ['db', 'db_gfn']:
         agent = DBFlowNetAgent(args, envs)
-    elif args.method in ['fm_egfn', 'tb_egfn']:
+    elif args.method in ['fm_egfn', 'tb_egfn', 'db_egfn']:
         from egfn import EvolutionGFNAgent
         evo_agent = EvolutionGFNAgent(args, envs)
         agent = evo_agent.agent_star
@@ -1092,7 +1163,7 @@ def main(args):
     if args.method in ['tb', 'tb_gfn', 'tb_egfn', 'ftb']:
         opt = torch.optim.Adam([{'params': agent.parameters(), 'lr': args.tlr},
                                  {'params':[agent.Z], 'lr': args.zlr} ])
-    elif args.method in ['db', 'db_gfn', 'fdb']:
+    elif args.method in ['db', 'db_gfn', 'fdb', 'db_egfn']:
         opt = torch.optim.Adam([{'params': agent.parameters(), 'lr': args.tlr}])
     else:
         opt = make_opt(agent.parameters(), args)
@@ -1116,7 +1187,7 @@ def main(args):
         sttr = args.ppo_epoch_size
 
     for i in tqdm(range(args.n_train_steps+1), disable=not args.progress):
-        if args.method in ['fm_egfn', 'tb_egfn']:
+        if args.method in ['fm_egfn', 'tb_egfn', 'db_egfn']:
             evo_agent.evolve()
         data = []
         for j in range(sttr):
