@@ -21,6 +21,7 @@ python run_hydra.py ndim=3 horizon=16 R0=0.001 method=qm N=8 quantile_dim=256 se
 python run_hydra.py ndim=3 horizon=16 method=qm N=8 beta=wang eta=0.75 # or -0.75
 python run_hydra.py ndim=3 horizon=16 method=qm N=8 beta=cpw eta=0.71
 python run_hydra.py ndim=3 horizon=16 method=qm N=8 beta=cvar eta=0.25 or 0.1
+python run_hydra.py ndim=5 horizon=20 method=fm_egfn n_train_steps=5000 replay_sample_size=16 R0=0.0001
 """
 
 
@@ -461,7 +462,7 @@ class TBFlowNetAgent:
         not_done_envs = [i for i in range(mbsize)]
         env_idx_return_map = {}
 
-        s = tf([i.reset()[0] for i in self.envs])
+        s = tf([i.reset()[0] for i in self.envs])[:mbsize, ...]
         done = [False] * mbsize
      
 

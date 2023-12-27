@@ -111,7 +111,7 @@ def make_model(args, mdp, out_per_mol=1):
 class Proxy:
     def __init__(self, args, bpath, device):
         home_path = os.path.expanduser("~")
-        proxy_path = f"{home_path}/Distributional-GFlowNets/mols/data/pretrained_proxy"
+        proxy_path = f"{home_path}/Documents/Repos/E-GFN/mols/data/pretrained_proxy"
         eargs = pickle.load(gzip.open(f'{proxy_path}/info.pkl.gz'))['args']
         params = pickle.load(gzip.open(f'{proxy_path}/best_params.pkl.gz'))
         self.mdp = MolMDPExtended(bpath)
@@ -160,7 +160,7 @@ _stop = [None]
 
 def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=True):
     debug_no_threads = False
-    device = torch.device('cuda')
+    device = torch.device('cpu')
 
     if num_steps is None:
         num_steps = args.num_iterations + 1
@@ -175,7 +175,7 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
         exp_dir = f'{args.save_path}'
         os.makedirs(exp_dir, exist_ok=True)
 
-    def save_stuff(iter):
+    def save_stuff(iter, corr_logp):
         pickle.dump(dataset.sampled_mols,
             gzip.open(f'{exp_dir}/' + str(iter) + '_sampled_mols.pkl.gz', 'wb'))
         pickle.dump(save_dict, gzip.open(os.path.join(exp_dir, "result.json"), 'wb'))
@@ -225,6 +225,7 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
     Lambda = tf([args.subtb_lambda])
 
     for i in range(num_steps):
+        print(f"Iteration : {i}", end = '\r')
         if not debug_no_threads:
             r = sampler()
             for thread in dataset.sampler_threads:
@@ -235,7 +236,6 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
             minibatch = r
         else:
             minibatch = dataset.sample2batch(dataset.sample(mbsize))
-        
         if args.obj == 'fm':
             p, pb, a, r, s, d, mols = minibatch
             # Since we sampled 'mbsize' trajectories, we're going to get
@@ -271,7 +271,6 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
             outflow = torch.logaddexp(outflow, np.log(log_reg_c)*torch.ones_like(outflow)) # care less about tiny flows
             outflow_plus_r = torch.where(d > 0, (r+log_reg_c).log(), outflow)
             exp_outflow = outflow.exp().detach()  # for logging
-
             if do_nblocks_reg:
                 losses = _losses = ((inflow - outflow_plus_r) / (s.nblocks * max_blocks)).pow(2)
             else:
@@ -287,7 +286,6 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
                 loss = losses.mean()
             opt.zero_grad()
             loss.backward(retain_graph=(not i % 50))
-
             _term_loss = (_losses * d).sum() / (d.sum() + 1e-20)
             _flow_loss = (_losses * (1-d)).sum() / ((1-d).sum() + 1e-20)
             last_losses.append((loss.item(), term_loss.item(), flow_loss.item()))
@@ -389,7 +387,6 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
                     mols[1],
                     [i.pow(2).sum().item() for i in model.parameters()],
                 ))
-        
         if args.clip_grad > 0:
             torch.nn.utils.clip_grad_value_(model.parameters(), args.clip_grad)
         opt.step()
@@ -409,18 +406,18 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
             print(f'Time: {time_used:.2f} sec; {time_used/print_interval:.3f} sec per step')
             time_last_check = time.time()
             last_losses = []
-            
             save_interval = print_interval if args.debug else 5000
-            if not i % save_interval and do_save:
+            if not i % save_interval and do_save and False:
+                print("Computing correlation...")
                 corr_logp, corr = compute_correlation(model, dataset.mdp, args)
-                
+                print("Computing evaluation metrics...")
                 avg_topk_rs, avg_topk_tanimoto, num_modes_above_7_5, num_modes_above_8_0, \
                     num_mols_above_7_5, num_mols_above_8_0 = eval_mols(dataset.sampled_mols,
                         reward_norm=args.reward_norm, reward_exp=args.reward_exp, algo="gfn")
                 avg_topk_rs_recent, avg_topk_tanimoto_recent, num_modes_above_7_5_recent, num_modes_above_8_0_recent, \
                     num_mols_above_7_5_recent, num_mols_above_8_0_recent = eval_mols(dataset.sampled_mols[-50000:],
                         reward_norm=args.reward_norm, reward_exp=args.reward_exp, algo="gfn")
-
+                print("Done.")
                 wandb_dict.update({
                     "spearman_corr": corr,
                     
@@ -461,11 +458,10 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
                         f"num_modes R>7.5 recent={num_modes_above_7_5_recent};")
                 
                 save_stuff(i, corr_logp)
-            
+            print(f"State visited: {len(dataset.sampled_mols)}")
             wandb_dict["state_visited"] = len(dataset.sampled_mols)
             if args.wandb:
                 wandb.log(wandb_dict, step=i)
-
     stop_everything()
     if do_save:
         save_stuff(i, None)
@@ -480,8 +476,8 @@ def main_mols(args):
     if args.wandb:
         wandb.init(project="GFN-mol", config=args, save_code=True)
 
-    bpath = "~/Distributional-GFlowNets/mols/data/blocks_PDB_105.json"
-    device = torch.device('cuda')
+    bpath = "~/Documents/Repos/E-GFN/mols/data/blocks_PDB_105.json"
+    device = torch.device('cpu')
 
     if args.floatX == 'float32':
         args.floatX = torch.float
@@ -521,7 +517,7 @@ def seed_torch(seed, verbose=True):
         print("==> Set seed to {:}".format(seed))
 
 def get_mol_path_graph(mol):
-    bpath = "~/Distributional-GFlowNets/mols/data/blocks_PDB_105.json"
+    bpath = "~/Documents/Repos/E-GFN/mols/data/blocks_PDB_105.json"
     mdp = MolMDPExtended(bpath)
     mdp.post_init(torch.device('cpu'), 'block_graph')
     mdp.build_translation_table()
@@ -575,11 +571,11 @@ def get_mol_path_graph(mol):
 
 # calculate exact likelihood of GFN for given molecules
 def compute_correlation(model, mdp, args):  
-    device = torch.device('cuda')
+    device = torch.device('cpu')
     tf = lambda x: torch.tensor(x, device=device).to(args.floatX)
     tint = lambda x: torch.tensor(x, device=device).long()
     home_path = os.path.expanduser("~")
-    test_mols = pickle.load(gzip.open(f'{home_path}/Distributional-GFlowNets/mols/data/some_mols_U_1k.pkl.gz'))
+    test_mols = pickle.load(gzip.open(f'{home_path}/Documents/Repos/E-GFN/mols/data/some_mols_U_1k.pkl.gz'))
 
     logsoftmax = nn.LogSoftmax(0)
     logp = []

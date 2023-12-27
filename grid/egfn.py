@@ -44,7 +44,7 @@ class EvolutionGFNAgent:
 
     def evaluate(self, agent, add_noise=False):
         data = agent.sample_many(self.args.num_eval_episodes, [])
-        rewards = tf([reward for (_, _, reward, _, _) in data]) if self.args.method == "fm_egfn" else data[2]
+        rewards = tf([reward for (_, _, reward, _, _) in data]) if self.args.method == "fm_egfn" else tf(data[2])
         return rewards.sum().item() / self.args.num_eval_episodes
 
     def evolve(self):
