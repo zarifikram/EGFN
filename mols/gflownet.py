@@ -160,7 +160,7 @@ _stop = [None]
 
 def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=True, egfn=None):
     debug_no_threads = False
-    device = torch.device('cpu')
+    device = torch.device('cuda')
 
     if num_steps is None:
         num_steps = args.num_iterations + 1
@@ -477,7 +477,7 @@ def main_mols(args):
         wandb.init(project="GFN-mol", config=args, save_code=True)
 
     bpath = "~/Documents/Repos/E-GFN/mols/data/blocks_PDB_105.json"
-    device = torch.device('cpu')
+    device = torch.device('cuda')
 
     if args.floatX == 'float32':
         args.floatX = torch.float
@@ -523,7 +523,7 @@ def seed_torch(seed, verbose=True):
 def get_mol_path_graph(mol):
     bpath = "~/Documents/Repos/E-GFN/mols/data/blocks_PDB_105.json"
     mdp = MolMDPExtended(bpath)
-    mdp.post_init(torch.device('cpu'), 'block_graph')
+    mdp.post_init(torch.device('cuda'), 'block_graph')
     mdp.build_translation_table()
     mdp.floatX = torch.float
     agraph = nx.DiGraph()
@@ -575,7 +575,7 @@ def get_mol_path_graph(mol):
 
 # calculate exact likelihood of GFN for given molecules
 def compute_correlation(model, mdp, args):  
-    device = torch.device('cpu')
+    device = torch.device('cuda')
     tf = lambda x: torch.tensor(x, device=device).to(args.floatX)
     tint = lambda x: torch.tensor(x, device=device).long()
     home_path = os.path.expanduser("~")
