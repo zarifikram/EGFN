@@ -1,5 +1,5 @@
 # Evolution guided GFlowNets (EGFN)
-
+![EGFN Architecture](assets/egfn_architecture.png)
 This repository is based on [Distributional-GFlowNets](https://github.com/zdhNarsil/Distributional-GFlowNets).
 
 PyTorch implementation for our paper 
