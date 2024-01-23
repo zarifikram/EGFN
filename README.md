@@ -1,4 +1,3 @@
-
 # Evolution guided GFlowNets (EGFN)
 
 This repository is based on [Distributional-GFlowNets](https://github.com/zdhNarsil/Distributional-GFlowNets).
