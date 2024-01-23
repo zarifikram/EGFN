@@ -2,6 +2,10 @@ defaults:
   - override hydra/launcher: submitit_slurm
 
 user: ${oc.env:USER}
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}gamma${gamma}
+    # dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}buffer_size${replay_buf_size}num_pop${population_size}elite${num_elites}
 
 wandb: 0
 save_path: 'output/flow_insp_0.pkl.gz'
@@ -9,6 +13,7 @@ device: cpu
 seed: 0
 progress: 1
 
+log_name: log
 method: fm
 lr: 1e-4
 opt: adam
@@ -65,7 +70,7 @@ mutation: true
 crossover_prob: 0.1
 mutation_prob: 0.9
 mutation_frac: 0.1
-mutation_strength: 0.1
+gamma: 1
 super_mutation_strength: 10
 super_mutation_prob: 0.25 #0.25 is good
 reset_prob: 0.1

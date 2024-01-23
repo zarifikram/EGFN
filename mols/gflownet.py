@@ -160,7 +160,7 @@ _stop = [None]
 
 def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=True, egfn=None):
     debug_no_threads = False
-    device = torch.device('cuda')
+    device = torch.device('cpu')
 
     if num_steps is None:
         num_steps = args.num_iterations + 1
@@ -195,7 +195,7 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
                 }
     tf = lambda x: torch.tensor(x, device=device).to(args.floatX)
     tint = lambda x: torch.tensor(x, device=device).long()
-    if args.obj == 'tb':
+    if args.obj in ['tb', 'tb_egfn']:
         model.logZ = nn.Parameter(tf(args.initial_log_Z))
     opt = torch.optim.Adam(model.parameters(), args.lr, weight_decay=args.weight_decay,
                            betas=(args.opt_beta, args.opt_beta2), eps=args.opt_epsilon)
@@ -225,7 +225,9 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
     Lambda = tf([args.subtb_lambda])
 
     for i in range(num_steps):
-        print(f"Iteration : {i}", end = '\r')
+        # print(f"Iteration : {i}")
+        if args.obj in ["fm_egfn", "tb_egfn", "db_egfn"]: egfn.evolve()
+        # print(f'evolved, dataset size now {len(dataset.online_mols)}')
         if not debug_no_threads:
             r = sampler()
             for thread in dataset.sampler_threads:
@@ -367,12 +369,12 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
             tzeros = torch.zeros(idc[-1]+1, device=device, dtype=args.floatX)
             traj_r = tzeros.index_add(0, idc, r)
 
-            if args.obj == 'tb':
+            if args.obj in ['tb', 'tb_egfn']:
                 uniform_log_PB = tzeros.index_add(0, idc, torch.log(1/n))
                 traj_logits = tzeros.index_add(0, idc, logits)
                 losses = ((model.logZ + traj_logits) - (torch.log(traj_r) + uniform_log_PB)).pow(2)
                 loss = losses.mean()
-            elif args.obj in ['db', 'detbal']:
+            elif args.obj in ['db', 'detbal', 'db_egfn']:
                 loss = detailed_balance_loss(logits, torch.log(1/n), mol_out_s[:, 1], torch.log(traj_r), lens)
             elif args.obj == 'subtb':
                 loss = tb_lambda_loss(logits, torch.log(1/n), mol_out_s[:, 1], torch.log(traj_r), lens, Lambda)
@@ -395,7 +397,7 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
             for _a,b in zip(model.parameters(), target_model.parameters()):
                 b.data.mul_(1-tau).add_(tau*_a)
 
-        print_interval = 10 if args.debug else 1000
+        print_interval = 10 if args.debug else 10 #1000
         if not i % print_interval:
             last_losses = [np.round(np.mean(i), 3) for i in zip(*last_losses)]
             wandb_dict = {"loss/loss": last_losses[0]} 
@@ -406,8 +408,8 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
             print(f'Time: {time_used:.2f} sec; {time_used/print_interval:.3f} sec per step')
             time_last_check = time.time()
             last_losses = []
-            save_interval = print_interval if args.debug else 5000
-            if not i % save_interval and do_save and False:
+            save_interval = print_interval if args.debug else 50 #5000
+            if not i % save_interval and do_save:
                 print("Computing correlation...")
                 corr_logp, corr = compute_correlation(model, dataset.mdp, args)
                 print("Computing evaluation metrics...")
@@ -458,7 +460,6 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
                         f"num_modes R>7.5 recent={num_modes_above_7_5_recent};")
                 
                 save_stuff(i, corr_logp)
-            print(f"State visited: {len(dataset.sampled_mols)}")
             wandb_dict["state_visited"] = len(dataset.sampled_mols)
             if args.wandb:
                 wandb.log(wandb_dict, step=i)
@@ -477,7 +478,7 @@ def main_mols(args):
         wandb.init(project="GFN-mol", config=args, save_code=True)
 
     bpath = "~/Documents/Repos/E-GFN/mols/data/blocks_PDB_105.json"
-    device = torch.device('cuda')
+    device = torch.device('cpu')
 
     if args.floatX == 'float32':
         args.floatX = torch.float
@@ -492,15 +493,15 @@ def main_mols(args):
     mdp = dataset.mdp
 
     model = make_model(args, mdp, 
-        out_per_mol=1 + (1 if args.obj in ['subtb', 'subtbWS', 'detbal', "db"] else 0))
+        out_per_mol=1 + (1 if args.obj in ['subtb', 'subtbWS', 'detbal', "db", "db_egfn"] else 0))
     
    
     model.to(args.floatX)
     model.to(device)
 
     proxy = Proxy(args, bpath, device)
-    if args.obj in ['fm_egfn']: from egfn import EvolutionGFNAgent
-    egfn = EvolutionGFNAgent(args, mdp, model, device, proxy, dataset) if args.obj in ['fm_egfn'] else None
+    if args.obj in ['fm_egfn', 'tb_egfn', 'db_egfn']: from egfn import EvolutionGFNAgent
+    egfn = EvolutionGFNAgent(args, mdp, model, device, proxy, dataset) if args.obj in ['fm_egfn', 'tb_egfn', 'db_egfn'] else None
     train_model_with_proxy(args, model, proxy, dataset, do_save=True, egfn=egfn)
     print('Done.')
     if args.wandb:
@@ -523,7 +524,7 @@ def seed_torch(seed, verbose=True):
 def get_mol_path_graph(mol):
     bpath = "~/Documents/Repos/E-GFN/mols/data/blocks_PDB_105.json"
     mdp = MolMDPExtended(bpath)
-    mdp.post_init(torch.device('cuda'), 'block_graph')
+    mdp.post_init(torch.device('cpu'), 'block_graph')
     mdp.build_translation_table()
     mdp.floatX = torch.float
     agraph = nx.DiGraph()
@@ -575,7 +576,7 @@ def get_mol_path_graph(mol):
 
 # calculate exact likelihood of GFN for given molecules
 def compute_correlation(model, mdp, args):  
-    device = torch.device('cuda')
+    device = torch.device('cpu')
     tf = lambda x: torch.tensor(x, device=device).to(args.floatX)
     tint = lambda x: torch.tensor(x, device=device).long()
     home_path = os.path.expanduser("~")

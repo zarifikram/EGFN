@@ -245,6 +245,8 @@ class ReplayBuffer:
     def sample(self):
         if not len(self.buf):
             return []
+        
+        
         if self.args.prb:
             # sample priority reward buffer. Divide the buffer into two parts: high reward and low reward
             # sample from high reward part with probability 0.5, and sample from low reward part with probability 0.5
@@ -305,6 +307,7 @@ class ReplayBufferTB:
         # action.shape is (self.sample_size, traj_length, 1) # reward.shape is (self.sample_size, 1)
         if not len(self.buf):
             return []
+        
         if self.args.prb:
             # sample priority reward buffer. Divide the buffer into two parts: high reward and low reward
             # sample from high reward part with probability 0.5, and sample from low reward part with probability 0.5
@@ -318,7 +321,7 @@ class ReplayBufferTB:
             sample2 = [other90_percentile[i] for i in idxs]
             return sample1 + sample2
         idxs = np.random.randint(0, len(self.buf), self.sample_size)
-        return sum([self.generate_backward(*self.buf[i]) for i in idxs], [])
+        return [self.buf[i] for i in idxs]
 
     def generate_backward(self, r, s0):
         s = np.int8(s0)
@@ -378,33 +381,7 @@ class ReplayBufferDB:
             sample2 = [other90_percentile[i] for i in idxs]
             return sample1 + sample2
         idxs = np.random.randint(0, len(self.buf), self.sample_size)
-        return sum([self.generate_backward(*self.buf[i]) for i in idxs], [])
-
-    def generate_backward(self, r, s0):
-        s = np.int8(s0)
-        os0 = self.env.obs(s)
-        # If s0 is a forced-terminal state, the the action that leads
-        # to it is s0.argmax() which .parents finds, but if it isn't,
-        # we must indicate that the agent ended the trajectory with
-        # the stop action
-        used_stop_action = s.max() < self.env.horizon - 1
-        done = True
-        # Now we work backward from that last transition
-        traj = []
-        while s.sum() > 0:
-            parents, actions = self.env.parent_transitions(s, used_stop_action)
-            # add the transition
-            traj.append([tf(i) for i in (parents, actions, [r], [self.env.obs(s)], [done])])
-            # Then randomly choose a parent state
-            if not used_stop_action:
-                i = np.random.randint(0, len(parents))
-                a = actions[i]
-                s[a] -= 1
-            # Values for intermediary trajectory states:
-            used_stop_action = False
-            done = False
-            r = 0
-        return traj
+        return [self.buf[i] for i in idxs]
 
 
 class FlowNetAgent:

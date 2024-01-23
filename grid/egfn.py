@@ -75,7 +75,8 @@ class EvolutionGFNAgent:
         self.fill_offspring_with_crossovers(offspring_index)
 
         # mutate all agents except the elite
-        self.mutate_all_but_elite(elite_index)
+        if self.args.mutation:
+            self.mutate_all_but_elite(elite_index)
 
     def mutate_all_but_elite(self, elite_index):
         for i in range(self.args.population_size):
@@ -153,7 +154,7 @@ class EvolutionGFNAgent:
 
         for param in agent.model.parameters():
             if random.random() < self.args.mutation_prob:
-                param.data += torch.normal(mean=0, std=1, size=param.size())
+                param.data += torch.normal(mean=0, std=self.args.gamma, size=param.size())
 
     def transfer_elite_weights(self, elite_index, unselected_index, offspring_index):
         new_elite_index = []

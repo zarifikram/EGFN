@@ -48,6 +48,7 @@ class GraphAgent(nn.Module):
 
     # vec_data is for conditioning input
     def forward(self, graph_data, vec_data=None, do_stems=True):
+       
         blockemb, stememb, bondemb = self.embeddings
         graph_data.x = blockemb(graph_data.x)
         if do_stems:
@@ -63,12 +64,12 @@ class GraphAgent(nn.Module):
             out = self.block2emb(torch.cat([out, batch_vec], 1))
         else:  # if self.version == 'v2' or self.version == 'v4':
             out = self.block2emb(out)
-
         h = out.unsqueeze(0)
         for i in range(self.num_conv_steps):
             m = F.leaky_relu(self.conv(out, graph_data.edge_index, graph_data.edge_attr))
             out, h = self.gru(m.unsqueeze(0).contiguous(), h.contiguous())
             out = out.squeeze(0)
+        
 
         # Index of the origin block of each stem in the batch (each
         # stem is a pair [block idx, stem atom type], we need to

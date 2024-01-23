@@ -20,7 +20,7 @@ class EvolutionGFNAgent:
 
         self.population = [
             make_model(args, mdp, 
-        out_per_mol=1 + (1 if args.obj in ['subtb', 'subtbWS', 'detbal', "db"] else 0)) for _ in range(args.population_size)
+        out_per_mol=1 + (1 if args.obj in ['subtb', 'subtbWS', 'detbal', "db", "db_egfn"] else 0)) for _ in range(args.population_size)
         ]
         print("Population size:", len(self.population))
         # turn off gradient for population
@@ -36,17 +36,21 @@ class EvolutionGFNAgent:
             for param in agent.parameters():
                 param.requires_grad = False
 
-    def replace_population_replay_buffer(self):
-        for agent in self.population:
-            agent.replay = self.agent_star.replay
 
     def evaluate(self, agent, add_noise=False):
-        data = agent.sample_many(self.args.num_eval_episodes, [])
-        rewards = tf([reward for (_, _, reward, _, _) in data]) if self.args.method == "fm_egfn" else tf(data[2])
-        return rewards.sum().item() / self.args.num_eval_episodes
+        # sample num_eval_episodes episodes, and return the average reward
+        # will add threading later. but not now
+        self.dataset.set_sampling_model(agent, self.proxy, sample_prob=1) # always sample from model
+        if self.args.obj in ['fm_egfn']:
+            p, pb, a, r, s, d, mols = self.dataset.sample2batch(self.dataset.sample(self.args.num_eval_episodes))
+        else:
+            s, a, r, d, n, mols, idc, lens, *o = self.dataset.sample2batch(self.dataset.sample(self.args.num_eval_episodes))
+        # rewards = tf([reward for (_, _, reward, _, _) in data]) if self.args.method == "fm_egfn" else tf(data[2])
+        return r.sum().item() / self.args.num_eval_episodes
 
     def evolve(self):
         fitness = tf([self.evaluate(agent) for agent in self.population])
+        print(f"Avg fitness: {fitness.mean().item():.3f}")
         argsort_fitness = fitness.argsort(descending=True)
         elite_index = argsort_fitness[: self.args.num_elites]
         # offspring index does not necessarily have pop_size - num_elites elements (but should be even)
@@ -70,6 +74,9 @@ class EvolutionGFNAgent:
 
         # mutate all agents except the elite
         self.mutate_all_but_elite(elite_index)
+
+        # replace the star agent to the dataset sampler
+        self.dataset.set_sampling_model(self.agent_star, self.proxy, sample_prob=self.args.sample_prob)
 
     def mutate_all_but_elite(self, elite_index):
         for i in range(self.args.population_size):
@@ -95,7 +102,7 @@ class EvolutionGFNAgent:
             self.crossover(self.population[i], self.population[j])
 
     def crossover(self, agent1, agent2):
-        for param1, param2 in zip(agent1.model.parameters(), agent2.model.parameters()):
+        for param1, param2 in zip(agent1.parameters(), agent2.parameters()):
             W1, W2 = param1.data, param2.data
             num_crossovers = fastrand.pcg32bounded(W1.shape[0])
             for _ in range(num_crossovers):
@@ -113,7 +120,7 @@ class EvolutionGFNAgent:
 
     def mutate(self, agent):
         weights = [
-            p for p in agent.model.parameters() if len(p.shape) > 1
+            p for p in agent.parameters() if len(p.shape) > 1
         ]  # exclude biases
         weight_mutation_probs = np.random.uniform(0, 1, len(weights))
         for weight, weight_mutation_prob in zip(weights, weight_mutation_probs):
@@ -145,7 +152,7 @@ class EvolutionGFNAgent:
         # if ¥es, then mutate the param with torch.normal(mean=0, std=1)
         # if no, then do nothing
 
-        for param in agent.model.parameters():
+        for param in agent.parameters():
             if random.random() < self.args.mutation_prob:
                 param.data += torch.normal(mean=0, std=1, size=param.size())
 
@@ -174,7 +181,7 @@ class EvolutionGFNAgent:
         self, master, replacee
     ):  # Replace the replacee individual with master
         for target_param, source_param in zip(
-            replacee.model.parameters(), master.model.parameters()
+            replacee.parameters(), master.parameters()
         ):
             target_param.data.copy_(source_param.data)
 

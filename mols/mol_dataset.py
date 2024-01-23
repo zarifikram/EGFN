@@ -55,8 +55,8 @@ class Dataset:
             or len(dset) < 32): 
                 return self._get_sample_model()
         # Sample trajectories by walking backwards from the molecules in our dataset
-
-        # Handle possible multithreading issues when independent threads
+        # Handle possible multi
+        # threading issues when independent threads
         # add/substract from dset:
         while True:
             try:
@@ -83,7 +83,54 @@ class Dataset:
             r = done = 0
             m = parents[self.train_rng.randint(len(parents))]  # uniformly sample backwards
         return samples
+    def _get_sample_model_batch(self, batch_size): # sample new mols in batch
+        m = [BlockMoleculeDataExtended() for _ in range(batch_size)]
+        samples = []
+        max_blocks = self.max_blocks
+        if self.early_stop_reg > 0 and np.random.uniform() < self.early_stop_reg:
+            early_stop_at = np.random.randint(self.min_blocks, self.max_blocks + 1)
+        else:
+            early_stop_at = max_blocks + 1
+        trajectory_stats = []
+        
+        for t in range(max_blocks):
+            s = self.mdp.mols2batch([self.mdp.mol2repr(_) for _ in m])
+            if getattr(self.sampling_model, "qm", False):
+                if self.sampling_model.thompson_sampling:
+                    dtype = self.floatX
+                    quantiles = torch.rand(int(s.batch.max() + 1), self.sampling_model.n_quantiles,
+                        dtype=dtype, device=s.x.device)
+                    stem_preds, mol_preds = self.sampling_model.forward_with_quantile(s, quantiles)
 
+                    num_stem, nq, _ = stem_preds.shape
+                    s_o = stem_preds[torch.arange(num_stem), torch.randint(nq, size=(num_stem,))]
+                    num_mol, nq, _ = mol_preds.shape
+                    m_o = mol_preds[torch.arange(num_mol), torch.randint(nq, size=(num_mol,))]
+
+                else:
+                    s_o, m_o = self.sampling_model(s)
+            else:
+                s_o, m_o = self.sampling_model(s)
+            
+            # ei pojonto
+            ## fix from run 330 onwards
+            if t < self.min_blocks:
+                m_o = m_o * 0 - 1000
+
+            # print(len(s), m_o.shape, s_o.shape)
+            logits = torch.cat([m_o, s_o], dim=1)
+            # print(m_o.shape, s_o.shape, logits.shape)
+            cat = torch.distributions.Categorical(logits=logits)
+            action = cat.sample()
+            if self.random_action_prob > 0 and self.train_rng.uniform() < self.random_action_prob:
+                action = self.train_rng.randint(int(t < self.min_blocks), logits.shape[0])
+            if t == early_stop_at:
+                action = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+
+            q = torch.cat([m_o, s_o], dim=1)
+            trajectory_stats.append((q[torch.arange(q.shape[0]), action].reshape(-1), action, torch.logsumexp(q, 1).reshape(-1)))
+            
+            
     def _get_sample_model(self):  # sample new mols
         m = BlockMoleculeDataExtended()
         samples = []
@@ -116,9 +163,9 @@ class Dataset:
             if t < self.min_blocks:
                 m_o = m_o * 0 - 1000 # prevent assigning prob to stop
                                      # when we can't stop
-
+            # print(len(s), m_o.shape, s_o.shape)
             logits = torch.cat([m_o[:, 0].reshape(-1), s_o.reshape(-1)])
-            #print(m_o.shape, s_o.shape, logits.shape)
+            # print(m_o.shape, s_o.shape, logits.shape)
             #print(m.blockidxs, m.jbonds, m.stems)
             cat = torch.distributions.Categorical(logits=logits)
             action = cat.sample().item()
@@ -153,7 +200,6 @@ class Dataset:
                         samples.append(((m_old,), (action,), 0, m, 0))
                     else:
                         samples.append((*zip(*self.mdp.parents(m)), 0, m, 0))
-        print(f"SAMPLED {len(samples)}")                
         p = self.mdp.mols2batch([self.mdp.mol2repr(i) for i in samples[-1][0]])
         qp = self.sampling_model(p)
 
@@ -205,7 +251,24 @@ class Dataset:
                 eidx = self.train_rng.choice(len(self.online_mols), n, False, prio/prio.sum())
                 samples = sum((self._get(i, self.online_mols) for i in eidx), [])
         return zip(*samples)
-
+    
+    def sample2(self, n):
+        if self.replay_mode == 'dataset':
+            eidx = self.train_rng.randint(0, len(self.train_mols), n)
+            samples = sum((self._get(i, self.train_mols) for i in eidx), [])
+        elif self.replay_mode == 'online':
+            # eidx = self.train_rng.randint(0, max(1,len(self.online_mols)), n)
+            samples = self._get_sample_model_batch(n)
+        elif self.replay_mode == 'prioritized':
+            if not len(self.online_mols):
+                # _get will sample from the model
+                samples = sum((self._get(0, self.online_mols) for i in range(n)), [])
+            else:
+                prio = np.float32([i[0] for i in self.online_mols])
+                eidx = self.train_rng.choice(len(self.online_mols), n, False, prio/prio.sum())
+                samples = sum((self._get(i, self.online_mols) for i in eidx), [])
+        return zip(*samples)
+    
     def sample2batch(self, mb):
         p, a, r, s, d, *o = mb
         mols = (p, s)
