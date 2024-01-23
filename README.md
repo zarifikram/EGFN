@@ -1,5 +1,4 @@
 # Evolution guided GFlowNets (EGFN)
-![EGFN Architecture](assets/egfn_architecture.png)
 This repository is based on [Distributional-GFlowNets](https://github.com/zdhNarsil/Distributional-GFlowNets).
 
 PyTorch implementation for our paper 
@@ -9,6 +8,7 @@ PyTorch implementation for our paper
 Anonymous authors.
 
 
+![EGFN Architecture](assets/egfn_architecture.png)
 
 We train our in two ways. Using evolutionary algorithms, we evolve a population of agent parameters to learn the optimal parameter population :robot::robot::robot: that maximize the reward signal. While evolution in the evolution step, the generated samples get stored in the prioritized replay buffer (PRB). Using the offline samples from the replay buffer and online samples from the current policy, we train a GFlowNets agent :robot: using gradient descent. 
 
