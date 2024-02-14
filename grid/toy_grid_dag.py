@@ -1152,6 +1152,8 @@ def main(args):
     empirical_distrib_losses = []
     error_dict = {"L1": {}, "KL": {}, "top10perc_reward":{}, "bottom10perc_reward": {}, "state_visited": {}}
     modes_dict = {}
+    replay_dict = {}
+    sample_dict = {}
     if args.func == "corner":
         last_idx = 0
         mode_dict = {k: False for k in np.ndindex(tuple([2,]*args.ndim))}
@@ -1210,6 +1212,8 @@ def main(args):
                     mode_dict[tuple(mode)] = True
                 num_modes = len([None for k, v in mode_dict.items() if v is True])
                 modes_dict[i] = num_modes
+                replay_dict[i] = agent.replay.buf
+                sample_dict[i] = data
                 last_idx = len(all_visited)
             
             if args.progress:
@@ -1240,6 +1244,8 @@ def main(args):
                 'emp_dist_loss': empirical_distrib_losses,
                 "error_dict": error_dict,
                 "modes_dict": modes_dict,
+                "replay_dict": replay_dict,
+                "sample_dict": sample_dict,
                 }
             pickle.dump(save_dict, gzip.open("./result.json", 'wb'))
 
