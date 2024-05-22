@@ -4,7 +4,7 @@ defaults:
 user: ${oc.env:USER}
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}gamma${gamma}augmented${augmented}ri${ri}feedback${feedback}
+    dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_ntrain${n_train_steps}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}gamma${gamma}augmented${augmented}ri${ri}_rp${random_policy}_fb${feedback}
     # dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}buffer_size${replay_buf_size}num_pop${population_size}elite${num_elites}
 
 wandb: 0
@@ -33,8 +33,8 @@ func: corner
 R0: 0.001
 R1: 0.5
 R2: 2.
-horizon: 16
-ndim: 2
+horizon: 21
+ndim: 50
 
 # MCMC
 bufsize: 16
@@ -95,7 +95,7 @@ sac_alpha: -1.0766 # 0.98*np.log(1/3)
 
 # gafn
 augmented: false
-ri: 0.1
+ri: 0.5
 
 # random policy
 random_policy: false

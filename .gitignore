@@ -154,3 +154,8 @@ cython_debug/
 */outputs
 qm9str
 tfbind8
+*/.DS_Store
+grid/.DS_Store
+.DS_Store
+grid/.DS_Store
+mols/.DS_Store

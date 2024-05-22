@@ -2,6 +2,11 @@ defaults:
   - override hydra/launcher: submitit_slurm
 
 user: ${oc.env:USER}
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/seed${seed}/${obj}_steps${num_iterations}
+    # dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}buffer_size${replay_buf_size}num_pop${population_size}elite${num_elites}
+
 
 wandb: false
 debug: false

@@ -9,6 +9,11 @@ from itertools import count, permutations
 import wandb
 import random
 import time
+from sklearn.preprocessing import LabelEncoder
+from Bio.SeqUtils.ProtParam import ProteinAnalysis
+from math import log2
+import pandas as pd
+
 
 from itertools import chain
 
@@ -27,28 +32,81 @@ python run_hydra.py ndim=3 horizon=16 method=qm N=8 beta=cvar eta=0.25 or 0.1
 python run_hydra.py ndim=5 horizon=20 method=fm_egfn n_train_steps=5000 replay_sample_size=16 R0=0.0001
 """
 
+TOKEN_GAP = "-"
+TOKENS_AA = list("ARNDCEQGHILKMFPSTWYV")
+TOKENS_AHO = sorted([TOKEN_GAP, *TOKENS_AA])
+
+ALPHABET_AHO = LabelEncoder().fit(TOKENS_AHO)
 
 _dev = [torch.device("cpu")]
 tf = lambda x: torch.FloatTensor(x).to(_dev[0])
 tl = lambda x: torch.LongTensor(x).to(_dev[0])
 
 
+
 def set_device(dev):
     _dev[0] = dev
 
+def token_string_from_tensor(
+    tensor: torch.Tensor,
+    alphabet: LabelEncoder,
+    from_logits: bool = True,
+) -> list[str]:
+    """Convert tensor representation of sequence to list of string
+
+    Parameters
+    ----------
+    tensor: torch.Tensor
+        Input tensor
+    from_logits: bool
+        If True, elect to first compute the argmax in the final dimension of the tensor
+
+    Returns
+    -------
+    List[str]
+        The sequence version
+    """
+    # convert to shape (b, L, V) (if from_logits)  or (b, L) (if not from_logits) if necessary
+    if (from_logits and tensor.dim() == 2) or (not from_logits and tensor.dim() == 1):
+        tensor = tensor.unsqueeze(0)
+
+    if from_logits:
+        tensor = tensor.argmax(-1)
+
+    tensor = tensor.cpu()
+    return [
+        "".join(alphabet.inverse_transform(tensor[i, ...].tolist()).tolist())
+        for i in range(tensor.size(0))
+    ]
+
+
+def get_seq(s):
+    base_seq = 'QVQLVQS-GTEVKKPGSSVKVSCKASG-GTFSS-----YAVSWVRQAPGQGLEWMGRFIPI---LNIKNYAQDFQGRVTITADKSTTTAYMELINLGPEDTAVYYCARGSLSGR-----------------EGLPLEYWGQGTLVSVSS' + 'EVVMTQSPATLSVSPGESATLYCRAS--QIVT------SDLAWYQQIPGQAPRLLIFA--------ASTRATGIPARFSGSGSE--TDFTLTISSLQSEDFAIYYCQQYFH-----------------------WPPTFGQGTKVEIK'
+    ax = torch.from_numpy(s)
+
+    alphabet = ALPHABET_AHO
+    first_seq = token_string_from_tensor(ax, alphabet, from_logits=False)
+    # now paste the first_seq at the beginning of the base_seq
+    base_seq = first_seq[0] + base_seq[len(first_seq):]
+    return base_seq
 
 def get_func(arg):
     if arg.func == "corner":
 
         def func(x):
-            ax = abs(x)
-            r = (
-                arg.R0
-                + (ax > 0.5).prod(-1) * arg.R1
-                + ((ax < 0.8) * (ax > 0.6)).prod(-1) * arg.R2
-                # - ((x > -0.8) * (x < -0.6)).prod(-1) * arg.R2
-            )
-            return r
+            base_seq = 'QVQLVQS-GTEVKKPGSSVKVSCKASG-GTFSS-----YAVSWVRQAPGQGLEWMGRFIPI---LNIKNYAQDFQGRVTITADKSTTTAYMELINLGPEDTAVYYCARGSLSGR-----------------EGLPLEYWGQGTLVSVSS' + 'EVVMTQSPATLSVSPGESATLYCRAS--QIVT------SDLAWYQQIPGQAPRLLIFA--------ASTRATGIPARFSGSGSE--TDFTLTISSLQSEDFAIYYCQQYFH-----------------------WPPTFGQGTKVEIK'
+            ax = torch.from_numpy(x)
+
+            alphabet = ALPHABET_AHO
+            first_seq = token_string_from_tensor(ax, alphabet, from_logits=False)
+            # now paste the first_seq at the beginning of the base_seq
+            base_seq = first_seq[0] + base_seq[len(first_seq):]
+            base_seq = base_seq.replace("-", "")
+            r = 50 - ProteinAnalysis(str(base_seq)).instability_index()
+            r = r / 10
+            r = 2 ** r
+            
+            return torch.tensor(r)
 
         return func
     elif arg.func == "cosine":
@@ -104,18 +162,17 @@ class GridEnv:
         return z
 
     def s2x(self, s):
-        return (
-            self.obs(s).reshape((self.ndim, self.horizon)) * self.xspace[None, :]
-        ).sum(1)
+        return s
 
     # [1, 6, 3] -> [1, -1, 0]
     # 1 or -1 means in mode, 0 means not in mode
     def s2mode(self, s):
-        ret = np.int32([0] * self.ndim)
-        x = self.s2x(s)
-        ret += np.int32((x > 0.6) * (x < 0.8))
-        ret += -1 * np.int32((x > -0.8) * (x < -0.6))
-        return ret
+        x = np.asarray(s)
+        reward = 50 - log2(self.func(self.s2x(x))) * 10
+        if reward <= 35:
+            return True
+        # TO-DO: return true if s is in mode
+        return False
 
     def reset(self):
         self._state = np.int32([0] * self.ndim)
@@ -171,32 +228,7 @@ class GridEnv:
         return self.obs(s), self.func(self.s2x(s)), s, reverse_a
 
     def true_density(self):
-        if self._true_density is not None:
-            return self._true_density
-
-        all_int_states = np.int32(
-            list(itertools.product(*[list(range(self.horizon))] * self.ndim))
-        )
-        # only (horizon-1, horizon-1) is False, others are True. do not know why
-        state_mask = np.array(
-            [
-                len(self.parent_transitions(s, False)[0]) > 0 or sum(s) == 0
-                for s in all_int_states
-            ]
-        )
-        all_xs = (
-            np.float32(all_int_states)
-            / (self.horizon - 1)
-            * (self.xspace[-1] - self.xspace[0])
-            + self.xspace[0]
-        )
-        traj_rewards = self.func(all_xs)[state_mask]
-        self._true_density = (
-            traj_rewards / traj_rewards.sum(),
-            list(map(tuple, all_int_states[state_mask])),
-            traj_rewards,
-        )
-        return self._true_density
+        return None
 
     def true_traj_density(self):
         td, end_states, true_r = self.true_density()
@@ -1596,7 +1628,7 @@ def main(args):
 
     if args.augmented:
         print("doing augmentation")
-        ri_eta_map = {8: 0.005, 20: args.ri, 32: 0.001, 64: 0.005, 128: 0.001}
+        ri_eta_map = {8: 0.005, 21: args.ri, 32: 0.001, 64: 0.005, 128: 0.001}
         args.ri_eta = ri_eta_map[args.horizon]
 
     seed_torch(args.seed)
@@ -1666,22 +1698,11 @@ def main(args):
         "bottom10perc_reward": {},
         "state_visited": {},
     }
+    modes_set = set()
     modes_dict = {}
     replay_dict = {}
     sample_dict = {}
-    if args.func == "corner":
-        last_idx = 0
-        mode_dict = {
-            k: False
-            for k in np.ndindex(
-                tuple(
-                    [
-                        2,
-                    ]
-                    * args.ndim
-                )
-            )
-        }
+    last_idx = 0
 
     ttsr = max(int(args.train_to_sample_ratio), 1)
     sttr = max(int(1 / args.train_to_sample_ratio), 1)  # sample to train ratio
@@ -1717,16 +1738,15 @@ def main(args):
 
         eval_every = 100
         if i % eval_every == 0 or i == args.n_train_steps:
-            l1, kl = compute_empirical_distribution_error(
-                env, all_visited[-args.num_empirical_loss :]
-            )
+            l1, kl = (0, 0)
             empirical_distrib_losses.append((l1, kl))
 
             if args.progress:
                 recent = min(len(all_visited), args.num_empirical_loss)  # 1000
                 ten_perc = int(0.1 * recent)
+            
                 rewards = np.sort(
-                    [env.func(env.s2x(s)) for s in all_visited[-recent:]]
+                    [(50 - log2(env.func(env.s2x(np.asarray(s)))) * 10) for s in all_visited[-recent:]]
                 )  # ascending
                 top_reward = rewards[-ten_perc:].mean()
                 bottom_reward = rewards[:ten_perc].mean()
@@ -1748,15 +1768,10 @@ def main(args):
                 )
 
             if args.func == "corner":
-                smode_ls = [env.s2mode(s) for s in all_visited[last_idx:]]
-                visited_mode_ls = [
-                    ((smode + 1) / 2).astype(np.int32)
-                    for smode in smode_ls
-                    if smode.prod() != 0
-                ]
-                for mode in visited_mode_ls:
-                    mode_dict[tuple(mode)] = True
-                num_modes = len([None for k, v in mode_dict.items() if v is True])
+                smode_ls = [s for s in all_visited[last_idx:] if env.s2mode(s)]
+                # add smodes_ls items to the mode_set
+                modes_set.update(smode_ls)
+                num_modes = len(modes_set)
                 modes_dict[i] = num_modes
                 # replay_dict[i] = agent.replay.buf
                 sample_dict[i] = data
@@ -1797,7 +1812,6 @@ def main(args):
                 "run_time": all_times,
                 "losses": np.float32(all_losses),
                 "visited": np.int8(all_visited),
-                "true_d": env.true_density()[0],
                 "emp_dist_loss": empirical_distrib_losses,
                 "error_dict": error_dict,
                 "modes_dict": modes_dict,
@@ -1805,6 +1819,15 @@ def main(args):
                 "sample_dict": sample_dict,
             }
             pickle.dump(save_dict, gzip.open("./result.json", "wb"))
+        
+    states = all_visited[-1000:]
+    seqs = [get_seq(np.asarray(s)) for s in states]
+    df = pd.DataFrame(
+            {
+                "AASeq": seqs
+            }
+        )
+    df.to_csv("samples.csv", index=False)
 
     if args.wandb:
         wandb.finish()
