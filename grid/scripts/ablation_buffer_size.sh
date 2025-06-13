@@ -9,3 +9,6 @@ do
     wait
 done
 
+
+python run_hydra.py ndim=3 horizon=20 method=db n_train_steps=2500 replay_sample_size=16 R0=0.00001 replay_buf_size=1000
+    

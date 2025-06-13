@@ -13,6 +13,7 @@ from sklearn.preprocessing import LabelEncoder
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 from math import log2
 import pandas as pd
+from typing import List
 
 
 from itertools import chain
@@ -1008,7 +1009,40 @@ class TBFlowNetAgent:
         loss = torch.cat(ll_diff).sum() / len(states)
         return [loss]
 
+class Potential(nn.Module):
+    def __init__(self, state_dim:int, hidden_dim:int =256,) -> None: 
+        super(Potential, self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(2*state_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
 
+    def forward(self, states: torch.Tensor) -> torch.Tensor:
+        # (B, state_dim) -> (B-1, state_dim) -> (B-1, 2*state_dim)
+        state_pairs = torch.cat([states[:-1], states[1:]], dim=-1)
+        return self.model(state_pairs)
+        
+    def calculate_loss(self, states: List[torch.Tensor], rewards: List[float], traj_lengths: List[int], dropout_prob: int=0.1) -> torch.Tensor:
+        total_loss = torch.zeros(1, device=states[0].device)
+        for ep, T in enumerate(traj_lengths):
+            state_trajectory = states[ep]
+            reward_estimation = self(state_trajectory)
+            T = int(traj_lengths[ep])
+
+            mask_r = torch.rand((T-1)).to(total_loss.device)
+            mask_r[mask_r>=dropout_prob] = 1
+            mask_r[mask_r<dropout_prob] = 0
+            mask_r[-1] = 1 if torch.sum(mask_r)==0 else mask_r[-1]
+
+            R_cum = torch.sum(reward_estimation * mask_r)
+            R_cum = R_cum * (T-1)/torch.sum(mask_r)
+            total_loss += ((R_cum - rewards[ep]).pow(2))
+        
+        return total_loss / len(traj_lengths)
+    
 class DBFlowNetAgent:
     def __init__(self, args, envs, is_star=True):
         out_dim = 2 * args.ndim + 2
@@ -1017,6 +1051,11 @@ class DBFlowNetAgent:
         )
         self.model.to(args.dev)
         print(self.model)
+
+        if args.led:
+            self.potential_model = Potential(args.horizon * args.ndim)
+            self.potential_model.to(args.dev)
+            self.opt_est = torch.optim.Adam(self.potential_model.parameters(), lr=args.lr)
 
         self.device = args.dev
         self.args = args
@@ -1147,9 +1186,17 @@ class DBFlowNetAgent:
         )
 
     def learn_from(self, it, batch):
+        if self.args.led:
+            return self.learn_from_led(it, batch)
+        else:
+            return self.learn_from_normal(it, batch)
+        
+    def learn_from_normal(self, it, batch):
         inf = 1000000000
 
         states, actions, returns, episode_lens = batch
+        print(f"states len(): {len(states)} actions len(): {len(actions)} returns len(): {len(returns)} episode_lens len(): {len(episode_lens)}")
+        print(f"state shape {states[0].shape } actions shape {actions[0].shape} returns shape {returns[0]} episode_lens shape {episode_lens[0]}")
         returns = torch.tensor(returns).to(self.dev)
 
         ll_diff = []
@@ -1199,12 +1246,93 @@ class DBFlowNetAgent:
             log_flow = pred[..., -1]  # F(s) (the last dimension)
             log_flow = log_flow[:-1]
 
+            ir = self.potential_model(curr_states_onehot).squeeze(-1)
+            
+
             curr_ll_diff = torch.zeros(curr_states.shape[0] - 1).to(self.dev)
             curr_ll_diff += log_flow
             curr_ll_diff += logits
             curr_ll_diff[:-1] -= log_flow[1:]
             curr_ll_diff[:-1] -= back_logits
             curr_ll_diff[-1] -= curr_return.log()
+            curr_ll_diff -= (ir[:-1] - ir[1:]).log()
+
+            ll_diff.append(curr_ll_diff**2)
+
+        ll_diff = torch.cat(ll_diff)
+        loss = ll_diff.sum() / len(ll_diff)
+        return [loss]
+
+    def learn_from_led(self, it, batch):
+        inf = 1000000000
+
+        states, actions, returns, episode_lens = batch
+        returns = torch.tensor(returns).to(self.dev)
+
+        ll_diff = []
+
+        one_hot_states = [self.convert_states_to_onehot(state) for state in states]
+        for steps in range(self.args.decompose_step):
+            loss = self.potential_model.calculate_loss(one_hot_states, torch.log(returns), episode_lens, self.args.dropout_prob)
+            self.opt_est.zero_grad()
+            loss.backward()
+            self.opt_est.step()
+
+        for data_idx in range(len(states)):
+            curr_episode_len = episode_lens[data_idx]
+
+            curr_states = states[data_idx][
+                :curr_episode_len, :
+            ]  # episode_len + 1, state_dim
+            curr_actions = actions[data_idx][
+                : curr_episode_len - 1, :
+            ]  # episode_len, action_dim
+            curr_return = returns[data_idx].float()
+
+            # convert state into one-hot format: steps, ndim x horizon
+            curr_states_onehot = self.convert_states_to_onehot(curr_states)
+
+            # get predicted forward (from 0 to n_dim) and backward logits (from n_dim to last): steps, 2 x ndim + 1
+            pred = self.model(curr_states_onehot)
+
+            edge_mask = torch.cat(
+                [
+                    (curr_states == self.horizon - 1).float(),
+                    torch.zeros((curr_states.shape[0], 1), device=self.dev),
+                ],
+                1,
+            )
+            logits = (pred[..., : self.ndim + 1] - inf * edge_mask).log_softmax(
+                1
+            )  # steps, n_dim + 1
+
+            init_edge_mask = (
+                curr_states == 0
+            ).float()  # whether it is at an initial position
+            back_logits = (
+                (0 if self.uniform_pb else 1) * pred[..., self.ndim + 1 : -1]
+                - inf * init_edge_mask
+            ).log_softmax(
+                1
+            )  # steps, n_dim
+
+            logits = logits[:-1, :].gather(1, curr_actions).squeeze(1)
+            back_logits = (
+                back_logits[1:-1, :].gather(1, curr_actions[:-1, :]).squeeze(1)
+            )
+
+            log_flow = pred[..., -1]  # F(s) (the last dimension)
+            log_flow = log_flow[:-1]
+
+            intermediate_rewards = self.potential_model(curr_states_onehot).squeeze(-1)
+
+            curr_ll_diff = torch.zeros(curr_states.shape[0] - 1).to(self.dev)
+            curr_ll_diff += log_flow
+            curr_ll_diff += logits
+            curr_ll_diff[:-1] -= log_flow[1:]
+            curr_ll_diff[:-1] -= back_logits
+            # curr_ll_diff[-1] -= curr_return.log()
+            curr_ll_diff += intermediate_rewards
 
             ll_diff.append(curr_ll_diff**2)
 

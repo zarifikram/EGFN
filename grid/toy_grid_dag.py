@@ -9,6 +9,7 @@ from itertools import count, permutations
 import wandb
 import random
 import time
+from typing import List
 
 from itertools import chain
 
@@ -17,6 +18,7 @@ from scipy.stats import norm
 from tqdm import tqdm
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 import matplotlib.pyplot as plt
 """
@@ -36,7 +38,7 @@ tl = lambda x: torch.LongTensor(x).to(_dev[0])
 def set_device(dev):
     _dev[0] = dev
 
-
+NUMBER_OF_EVAL = 0
 def get_func(arg):
     if arg.func == "corner":
 
@@ -579,6 +581,40 @@ class FlowNetAgent:
 
         return loss, term_loss.detach(), flow_loss.detach()
 
+class Potential(nn.Module):
+    def __init__(self, state_dim:int, hidden_dim:int =256,) -> None: 
+        super(Potential, self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(2*state_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, states: torch.Tensor) -> torch.Tensor:
+        # (B, state_dim) -> (B-1, state_dim) -> (B-1, 2*state_dim)
+        state_pairs = torch.cat([states[:-1], states[1:]], dim=-1)
+        return self.model(state_pairs)
+        
+    def calculate_loss(self, states: List[torch.Tensor], rewards: List[float], traj_lengths: List[int], dropout_prob: int=0.1) -> torch.Tensor:
+        total_loss = torch.zeros(1, device=states[0].device)
+        for ep, T in enumerate(traj_lengths):
+            state_trajectory = states[ep]
+            reward_estimation = self(state_trajectory)
+            T = int(traj_lengths[ep])
+
+            mask_r = torch.rand((T-1)).to(total_loss.device)
+            mask_r[mask_r>=dropout_prob] = 1
+            mask_r[mask_r<dropout_prob] = 0
+            mask_r[-1] = 1 if torch.sum(mask_r)==0 else mask_r[-1]
+
+            R_cum = torch.sum(reward_estimation * mask_r)
+            R_cum = R_cum * (T-1)/torch.sum(mask_r)
+            total_loss += ((R_cum - rewards[ep]).pow(2))
+        
+        return total_loss / len(traj_lengths)
+    
 class RND(nn.Module):
     def __init__(self, state_dim, reward_scale=0.5, hidden_dim=256, s_latent_dim=128):
         super(RND, self).__init__()
@@ -986,6 +1022,11 @@ class DBFlowNetAgent:
         self.model.to(args.dev)
         print(self.model)
 
+        if args.led:
+            self.potential_model = Potential(args.horizon * args.ndim)
+            self.potential_model.to(args.dev)
+            self.opt_est = torch.optim.Adam(self.potential_model.parameters(), lr=args.lr)
+
         self.device = args.dev
         self.args = args
 
@@ -1008,6 +1049,8 @@ class DBFlowNetAgent:
         return self.model.parameters()
 
     def sample_many(self, mbsize, all_visited, to_print=False):
+        global NUMBER_OF_EVAL
+        NUMBER_OF_EVAL += mbsize
         self.iter_cnt += 1
 
         batch_s, batch_a = [[] for i in range(mbsize)], [[] for i in range(mbsize)]
@@ -1115,6 +1158,12 @@ class DBFlowNetAgent:
         )
 
     def learn_from(self, it, batch):
+        if self.args.led:
+            return self.learn_from_led(it, batch)
+        else:
+            return self.learn_from_normal(it, batch)
+        
+    def learn_from_normal(self, it, batch):
         inf = 1000000000
 
         states, actions, returns, episode_lens = batch
@@ -1166,6 +1215,7 @@ class DBFlowNetAgent:
 
             log_flow = pred[..., -1]  # F(s) (the last dimension)
             log_flow = log_flow[:-1]
+            
 
             curr_ll_diff = torch.zeros(curr_states.shape[0] - 1).to(self.dev)
             curr_ll_diff += log_flow
@@ -1180,6 +1230,82 @@ class DBFlowNetAgent:
         loss = ll_diff.sum() / len(ll_diff)
         return [loss]
 
+    def learn_from_led(self, it, batch):
+        inf = 1000000000
+
+        states, actions, returns, episode_lens = batch
+        returns = torch.tensor(returns).to(self.dev)
+
+        ll_diff = []
+
+        one_hot_states = [self.convert_states_to_onehot(state) for state in states]
+        for steps in range(self.args.decompose_step):
+            loss = self.potential_model.calculate_loss(one_hot_states, torch.log(returns), episode_lens, self.args.dropout_prob)
+            self.opt_est.zero_grad()
+            loss.backward()
+            self.opt_est.step()
+
+        for data_idx in range(len(states)):
+            curr_episode_len = episode_lens[data_idx]
+
+            curr_states = states[data_idx][
+                :curr_episode_len, :
+            ]  # episode_len + 1, state_dim
+            curr_actions = actions[data_idx][
+                : curr_episode_len - 1, :
+            ]  # episode_len, action_dim
+            curr_return = returns[data_idx].float()
+
+            # convert state into one-hot format: steps, ndim x horizon
+            curr_states_onehot = self.convert_states_to_onehot(curr_states)
+
+            # get predicted forward (from 0 to n_dim) and backward logits (from n_dim to last): steps, 2 x ndim + 1
+            pred = self.model(curr_states_onehot)
+
+            edge_mask = torch.cat(
+                [
+                    (curr_states == self.horizon - 1).float(),
+                    torch.zeros((curr_states.shape[0], 1), device=self.dev),
+                ],
+                1,
+            )
+            logits = (pred[..., : self.ndim + 1] - inf * edge_mask).log_softmax(
+                1
+            )  # steps, n_dim + 1
+
+            init_edge_mask = (
+                curr_states == 0
+            ).float()  # whether it is at an initial position
+            back_logits = (
+                (0 if self.uniform_pb else 1) * pred[..., self.ndim + 1 : -1]
+                - inf * init_edge_mask
+            ).log_softmax(
+                1
+            )  # steps, n_dim
+
+            logits = logits[:-1, :].gather(1, curr_actions).squeeze(1)
+            back_logits = (
+                back_logits[1:-1, :].gather(1, curr_actions[:-1, :]).squeeze(1)
+            )
+
+            log_flow = pred[..., -1]  # F(s) (the last dimension)
+            log_flow = log_flow[:-1]
+
+            intermediate_rewards = self.potential_model(curr_states_onehot).squeeze(-1)
+
+            curr_ll_diff = torch.zeros(curr_states.shape[0] - 1).to(self.dev)
+            curr_ll_diff += log_flow
+            curr_ll_diff += logits
+            curr_ll_diff[:-1] -= log_flow[1:]
+            curr_ll_diff[:-1] -= back_logits
+            # curr_ll_diff[-1] -= curr_return.log()
+            curr_ll_diff += intermediate_rewards
+
+            ll_diff.append(curr_ll_diff**2)
+
+        ll_diff = torch.cat(ll_diff)
+        loss = ll_diff.sum() / len(ll_diff)
+        return [loss]
 
 class SplitCategorical:
     def __init__(self, n, logits):
@@ -1538,7 +1664,157 @@ class SACAgent:
                 b.data.mul_(1 - self.tau).add_(self.tau * a)
         return J_Q + J_pi + J_alpha, J_Q, J_pi, J_alpha, self.alpha
 
+class IQLAgent:
+    """
+    Heavy inspiration from this code 
+    https://github.com/Manchery/iql-pytorch
+    """
+    def __init__(self, args, envs):
+        self.actor = make_mlp(
+            [args.horizon * args.ndim] + [args.n_hid] * args.n_layers + [args.ndim + 1],
+            tail=[nn.Softmax(1)],
+        )
+        self.actor.to(args.dev)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=args.iql_actor_lr)
+        self.actor_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.actor_optimizer, T_max=int(1e6))
 
+        self.critic = make_mlp(
+            [args.horizon * args.ndim] + [args.n_hid] * args.n_layers + [args.ndim + 1]
+        )
+        self.critic.to(args.dev)
+        self.critic_target = copy.deepcopy(self.critic)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=args.iql_critic_lr)
+
+        self.value = make_mlp(
+            [args.horizon * args.ndim] + [args.n_hid] * args.n_layers + [1]
+        )
+        self.value.to(args.dev)
+        self.value_target = copy.deepcopy(self.value)
+        self.value_optimizer = torch.optim.Adam(self.value.parameters(), lr=args.iql_value_lr)
+
+        self.envs = envs
+        self.mbsize = args.mbsize
+        self.tau = args.bootstrap_tau
+        self.gamma = 0.99
+        self.device = args.dev
+        self.expectile = args.expectile
+        self.temperature = args.iql_temp
+        self.discount = args.iql_discount
+
+    def parameters(self):
+        return (
+            list(self.actor.parameters())
+            + list(self.critic.parameters())
+            + list(self.value.parameters())
+        )
+    
+    def sample_many(self, mbsize, all_visited):
+        s = tf([i.reset()[0] for i in self.envs])
+        done = [False] * mbsize
+        trajs = defaultdict(list)
+        while not all(done):
+            with torch.no_grad():
+                pol = Categorical(logits=self.actor(s)/self.temperature) 
+                acts = pol.sample()
+            step = [
+                i.step(a)
+                for i, a in zip([e for d, e in zip(done, self.envs) if not d], acts)
+            ]
+            c = count(0)
+            m = {j: next(c) for j in range(mbsize) if not done[j]}
+            for si, a, (sp, r, d, _), (traj_idx, _) in zip(
+                s, acts, step, sorted(m.items())
+            ):
+                trajs[traj_idx].append(
+                    [si[None, :]] + [tf([i]) for i in (a, r, sp, d)]
+                )
+            done = [bool(d or step[m[i]][2]) for i, d in enumerate(done)]
+            s = tf([i[0] for i in step if not i[2]])
+            for _, r, d, sp in step:
+                if d:
+                    all_visited.append(tuple(sp))
+        return sum(trajs.values(), [])
+    
+    def learn_from(self, it: int, batch: list[tuple]) -> torch.Tensor:
+        # takes the batch and updates different models.
+        # each update returns the loss
+        # returns the total loss
+        s, a, r, sp, d = [torch.cat(i, 0) for i in zip(*batch)]
+        a = a.long()
+        d = d.bool()
+        value_loss = self.update_value(s, a)
+        actor_loss = self.update_actor(s, a)
+        critic_loss = self.update_q(s, a, r, sp, d)
+        self.update_target()
+        return [value_loss, actor_loss, critic_loss]
+    
+    def update_value(self, states: torch.Tensor, actions: torch.LongTensor) -> torch.FloatTensor:
+        with torch.no_grad():
+            critic_action_values = self.critic_target(states).detach()
+            q = torch.take_along_dim(critic_action_values, actions.unsqueeze(0), dim = 1)
+
+        v = self.value(states)
+        value_loss = self.loss(q - v, self.expectile).mean()
+
+        self.value_optimizer.zero_grad()
+        value_loss.backward()
+        self.value_optimizer.step()
+        
+        return value_loss
+
+
+    def update_actor(self, states: torch.Tensor, actions: torch.LongTensor) -> torch.FloatTensor:
+        with torch.no_grad():
+            v = self.value(states)
+            critic_action_values = self.critic_target(states).detach()
+            q = torch.take_along_dim(critic_action_values, actions.unsqueeze(0), dim = 1)
+            exp_a = torch.exp((q - v) * self.temperature)
+            exp_a = torch.clamp(exp_a, max=100.0).squeeze(-1).detach()
+
+        action_prob = self.actor(states)
+        action_prob_difference = F.nll_loss(F.log_softmax(action_prob, dim=1), actions)
+        actor_loss = (exp_a.unsqueeze(-1) * action_prob_difference).mean()
+    
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+        self.actor_scheduler.step()
+
+        return actor_loss
+    
+    def update_q(
+        self,
+        states: torch.Tensor,
+        actions: torch.LongTensor,
+        rewards: torch.FloatTensor,
+        next_states: torch.Tensor,
+        dones: torch.BoolTensor,
+    ) -> torch.FloatTensor:
+        not_dones = torch.logical_not(dones)
+        with torch.no_grad():
+            next_v = self.value(next_states)
+            target_q = (rewards + self.discount * not_dones * next_v).detach()
+        
+        critic_action_values = self.critic(states)
+        q = torch.take_along_dim(critic_action_values, actions.unsqueeze(0), dim = 1)
+
+        critic_loss = ((q - target_q)**2).mean()
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        return critic_loss
+    
+    def update_target(self):
+        for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
+            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+
+    def loss(self, diff: torch.Tensor, expectile:float=0.8) -> torch.FloatTensor:
+        weight = torch.where(diff > 0, expectile, (1 - expectile))
+        return weight * (diff**2)
+
+       
 def make_opt(params, args):
     params = list(params)
     if not len(params):
@@ -1550,7 +1826,6 @@ def make_opt(params, args):
     elif args.opt == "msgd":
         opt = torch.optim.SGD(params, args.lr, momentum=args.momentum)
     return opt
-
 
 def compute_empirical_distribution_error(env, visited):
     if not len(visited):
@@ -1638,6 +1913,8 @@ def main(args):
         agent = PPOAgent(args, envs)
     elif args.method == "sac":
         agent = SACAgent(args, envs)
+    elif args.method == "iql":
+        agent = IQLAgent(args, envs)
     elif args.method in ["random_traj", "rand", "random"]:
         agent = RandomTrajAgent(args, envs)
 
@@ -1650,6 +1927,8 @@ def main(args):
         )
     elif args.method in ["db", "db_gfn", "fdb", "db_egfn"]:
         opt = torch.optim.Adam([{"params": agent.parameters(), "lr": args.tlr}])
+    elif args.method in ['iql']:
+        opt = None
     else:
         opt = make_opt(agent.parameters(), args)
 
@@ -1658,6 +1937,7 @@ def main(args):
     all_times = [] # useful for runtime analysis
     all_visited = []
     all_visited_eval = []
+    all_fitness = []
     empirical_distrib_losses = []
     error_dict = {
         "L1": {},
@@ -1667,8 +1947,11 @@ def main(args):
         "state_visited": {},
     }
     modes_dict = {}
+    eval_dict = {}
     replay_dict = {}
     sample_dict = {}
+    all_fitness = {}
+    fitness = 0
     if args.func == "corner":
         last_idx = 0
         mode_dict = {
@@ -1694,7 +1977,7 @@ def main(args):
     start_time = time.time()
     for i in tqdm(range(args.n_train_steps + 1), disable=not args.progress):
         if args.method in ["fm_egfn", "tb_egfn", "db_egfn"]:
-            evo_agent.evolve()
+            fitness = evo_agent.evolve()
         data = []
         for j in range(sttr):
             data += agent.sample_many(args.mbsize, all_visited)
@@ -1704,6 +1987,9 @@ def main(args):
                     i * ttsr + j, data
                 )  # returns (opt loss, *metrics)
                 if losses is not None:
+                    all_losses.append([i.item() for i in losses])
+                    if args.method in ['iql']:
+                       continue 
                     losses[0].backward()
                     if args.clip_grad_norm > 0:
                         torch.nn.utils.clip_grad_norm_(
@@ -1711,7 +1997,6 @@ def main(args):
                         )
                     opt.step()
                     opt.zero_grad()
-                    all_losses.append([i.item() for i in losses])
                     time_elapsed = time.time() - start_time
                     all_times.append(time_elapsed)
 
@@ -1758,7 +2043,9 @@ def main(args):
                     mode_dict[tuple(mode)] = True
                 num_modes = len([None for k, v in mode_dict.items() if v is True])
                 modes_dict[i] = num_modes
+                eval_dict[i] = NUMBER_OF_EVAL
                 # replay_dict[i] = agent.replay.buf
+                all_fitness[i] = fitness
                 sample_dict[i] = data
                 last_idx = len(all_visited)
 
@@ -1801,8 +2088,10 @@ def main(args):
                 "emp_dist_loss": empirical_distrib_losses,
                 "error_dict": error_dict,
                 "modes_dict": modes_dict,
+                "eval_dict": eval_dict,
                 "replay_dict": replay_dict,
                 "sample_dict": sample_dict,
+                "fitness_dict": all_fitness,
             }
             pickle.dump(save_dict, gzip.open("./result.json", "wb"))
 

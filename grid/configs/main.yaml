@@ -4,7 +4,7 @@ defaults:
 user: ${oc.env:USER}
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}gamma${gamma}augmented${augmented}ri${ri}feedback${feedback}
+    dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}_crossover${crossover}_replay_size${replay_sample_size}gamma${gamma}augmented${augmented}ri${ri}feedback${feedback}_led${led}
     # dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}buffer_size${replay_buf_size}num_pop${population_size}elite${num_elites}
 
 wandb: 0
@@ -62,8 +62,8 @@ indist: false
 outdist: false
 
 # Evolution Guided GFlowNet
-population_size: 10 # 25 might be good
-num_eval_episodes: 10 # 1 seems just fine
+population_size: 5 # 25 might be good
+num_eval_episodes: 4 # 1 seems just fine
 num_elites: 2
 tournament_size: 4
 mutation: true
@@ -78,6 +78,7 @@ weight_limit: 100000
 top_sample_perc: 0.5
 percentile: 0.9
 feedback: false
+crossover: true
 
 
 
@@ -99,3 +100,16 @@ ri: 0.1
 
 # random policy
 random_policy: false
+
+# led
+led: false
+decompose_step: 3
+dropout_prob: 0.1
+
+# iql
+expectile: 0.7
+iql_actor_lr: 3e-4
+iql_value_lr: 3e-4
+iql_critic_lr: 3e-4
+iql_temp: 3.0
+iql_discount: 0.99

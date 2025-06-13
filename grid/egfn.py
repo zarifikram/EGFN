@@ -83,6 +83,7 @@ class EvolutionGFNAgent:
         # copy the star agent weights to the worst agent
         if self.args.feedback:
             self.clone(self.agent_star, self.population[argsort_fitness[-1]])
+        return fitness
 
     def mutate_all_but_elite(self, elite_index):
         for i in range(self.args.population_size):
@@ -108,6 +109,8 @@ class EvolutionGFNAgent:
             self.crossover(self.population[i], self.population[j])
 
     def crossover(self, agent1: FlowNetAgent, agent2: FlowNetAgent):
+        if not self.args.crossover:
+            return
         for param1, param2 in zip(agent1.model.parameters(), agent2.model.parameters()):
             W1, W2 = param1.data, param2.data
             num_crossovers = fastrand.pcg32bounded(W1.shape[0])

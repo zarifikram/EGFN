@@ -4,7 +4,7 @@ defaults:
 user: ${oc.env:USER}
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_ntrain${n_train_steps}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}gamma${gamma}augmented${augmented}ri${ri}_rp${random_policy}_fb${feedback}
+    dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_ntrain${n_train_steps}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}gamma${gamma}augmented${augmented}ri${ri}_rp${random_policy}_fb${feedback}_led${led}
     # dir: outputs/${now:%Y-%m-%d}/seed${seed}/${method}_R0${R0}_dim${ndim}_H${horizon}_prb${prb}_mutation_${mutation}replay_size${replay_sample_size}buffer_size${replay_buf_size}num_pop${population_size}elite${num_elites}
 
 wandb: 0
@@ -99,3 +99,9 @@ ri: 0.5
 
 # random policy
 random_policy: false
+
+
+# led
+led: false
+decompose_step: 3
+dropout_prob: 0.1
