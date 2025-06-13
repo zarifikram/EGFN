@@ -9,11 +9,11 @@ PyTorch implementation for our paper
 
   
 
-[Evolution guided generative flow networks]().
+[Evolution guided generative flow networks](https://openreview.net/forum?id=UgZIR6TF5N).
 
-  
+Transaction of Machine Learning Research
 
-Anonymous authors.
+Zarif Ikram, Ling Pan, Dianbo Liu
 
   
   
@@ -173,7 +173,7 @@ If you use the code for your research, please cite:
 
 ```
 @article{
-	ikram2024evolution,
+	ikram2025evolution,
 	title={Evolution guided generative flow networks},
 	author={Ikram, Zarif and Pan, Ling and Liu, Dianbo},
 	journal={Transactions on Machine Learning Research},
