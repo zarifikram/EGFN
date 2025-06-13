@@ -163,3 +163,21 @@ python gflownet.py obj=fm_egfn sample_prob=0.2
 ```
 
 To change the configurations for the experiment, simply change the `configs/main_gfn.yaml` file.
+
+
+
+
+##  Citations
+
+If you use the code for your research, please cite:
+
+```
+@article{
+	ikram2024evolution,
+	title={Evolution guided generative flow networks},
+	author={Ikram, Zarif and Pan, Ling and Liu, Dianbo},
+	journal={Transactions on Machine Learning Research},
+	year={2025},
+	url={https://openreview.net/forum?id=UgZIR6TF5N},
+}
+```
